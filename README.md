@@ -39,9 +39,14 @@
 ### Homebrew（推荐）
 
 ```bash
-brew tap marstechhan/sub2api-bar https://github.com/MarsTechHAN/sub2api-bar.git
-brew install sub2api-bar
+brew trust --formula marstechhan/sub2api-bar/sub2api-bar
+brew tap marstechhan/sub2api-bar https://github.com/MarsTechHAN/sub2api-bar
+brew install --HEAD sub2api-bar
 ```
+
+在本机现编译 `main` 上的最新代码，不下载预编译产物。
+
+> `brew trust` 是 Homebrew 7 加的一道闸：非官方 tap 里的 formula 默认不加载，且必须**在 `brew tap` 之前**信任，否则 tap 会以 `invalid syntax in tap!` 失败。Homebrew 6 及更早没有这一步，可以跳过。
 
 装好之后把 app 链进「应用程序」，方便 Spotlight 启动与开机自启：
 
@@ -50,10 +55,10 @@ ln -sfn "$(brew --prefix sub2api-bar)/Sub2API Quota.app" /Applications/
 open "/Applications/Sub2API Quota.app"
 ```
 
-跟随 `main` 分支的最新代码：
+卸载：
 
 ```bash
-brew install --HEAD sub2api-bar
+brew uninstall sub2api-bar && brew untap marstechhan/sub2api-bar
 ```
 
 ### 从源码构建

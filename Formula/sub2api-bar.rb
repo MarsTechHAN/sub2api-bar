@@ -1,6 +1,7 @@
-# 装在自己的 tap 里：
-#   brew tap marstechhan/sub2api-bar https://github.com/MarsTechHAN/sub2api-bar.git
-#   brew install sub2api-bar
+# 装在自己的 tap 里（brew trust 必须在 brew tap 之前，Homebrew 7 起）：
+#   brew trust --formula marstechhan/sub2api-bar/sub2api-bar
+#   brew tap marstechhan/sub2api-bar https://github.com/MarsTechHAN/sub2api-bar
+#   brew install --HEAD sub2api-bar
 class Sub2apiBar < Formula
   desc "Menu bar indicator for sub2api account quota on macOS"
   homepage "https://github.com/MarsTechHAN/sub2api-bar"
