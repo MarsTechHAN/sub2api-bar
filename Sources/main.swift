@@ -8,6 +8,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     nonisolated override init() { super.init() }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 设置窗口里的复制粘贴依赖主菜单里的 key equivalent
+        MainMenu.install()
         controller = StatusItemController()
     }
 
