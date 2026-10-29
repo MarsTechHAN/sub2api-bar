@@ -84,12 +84,8 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         isRefreshing = true
         rebuildMenu()
 
-        let endpoint = s.endpoint, apiKey = s.apiKey
-        let accountID = s.accountID, cycleMode = s.cycleMode
-
         Task { [weak self] in
-            let result = await SnapshotLoader.load(endpoint: endpoint, apiKey: apiKey,
-                                                   accountID: accountID, cycleMode: cycleMode, force: force)
+            let result = await SnapshotLoader.loadConfigured(force: force)
             await MainActor.run { self?.apply(result) }
         }
     }
@@ -98,6 +94,9 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         isRefreshing = false
         if !result.accounts.isEmpty { accounts = result.accounts }
         snapshot = result.snapshot
+        if let e = snapshot.errorMessage ?? snapshot.usage.error {
+            Log.write("refresh error: \(e)")
+        }
         // 之前选的账号没了，把回落的结果记下来
         if let a = result.snapshot.account, a.id != Settings.shared.accountID {
             Settings.shared.accountID = a.id
@@ -237,7 +236,12 @@ final class StatusItemController: NSObject, NSMenuDelegate {
         // 用量窗口
         addSection("用量窗口")
         if snapshot.usage.windows.isEmpty {
-            addView(MenuViews.noteRow(isRefreshing ? "加载中…" : "暂无数据"))
+            if let e = snapshot.usage.error {
+                addView(MenuViews.noteRow(e, color: .systemOrange, size: 11,
+                                          symbol: "exclamationmark.triangle.fill"))
+            } else {
+                addView(MenuViews.noteRow(isRefreshing ? "加载中…" : "暂无数据"))
+            }
         }
         for w in snapshot.usage.windows {
             addView(MenuViews.usageRow(w))
@@ -245,9 +249,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
 
         // 今日
         addSection("今日用量")
-        addView(MenuViews.statRow(primary: Fmt.money(snapshot.today.cost),
-                                  secondary: "\(Fmt.count(snapshot.today.requests)) 次请求 · \(Fmt.tokens(snapshot.today.tokens)) tokens",
-                                  note: Fmt.monthDay.string(from: snapshot.fetchedAt)))
+        if let e = snapshot.todayError {
+            addView(MenuViews.noteRow(e, color: .systemOrange, size: 11,
+                                      symbol: "exclamationmark.triangle.fill"))
+        } else {
+            addView(MenuViews.statRow(primary: Fmt.money(snapshot.today.cost),
+                                      secondary: "\(Fmt.count(snapshot.today.requests)) 次请求 · \(Fmt.tokens(snapshot.today.tokens)) tokens",
+                                      note: Fmt.monthDay.string(from: snapshot.fetchedAt)))
+        }
 
         // 计费周期
         addSection("计费周期")
@@ -260,11 +269,14 @@ final class StatusItemController: NSObject, NSMenuDelegate {
                 addView(MenuViews.noteRow("历史数据只有整日粒度，周期起点当天被整天计入，金额略偏大。",
                                           color: .tertiaryLabelColor))
             }
+        } else if let e = snapshot.cycleError {
+            addView(MenuViews.noteRow(e, color: .systemOrange, size: 11,
+                                      symbol: "exclamationmark.triangle.fill"))
         } else {
             addView(MenuViews.noteRow(isRefreshing ? "加载中…" : "暂无数据"))
         }
 
-        if let e = snapshot.usage.error ?? snapshot.errorMessage {
+        if let e = snapshot.errorMessage {
             menu.addItem(.separator())
             addView(MenuViews.noteRow(e, color: .systemOrange, size: 11,
                                       symbol: "exclamationmark.triangle.fill"))

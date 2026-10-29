@@ -32,7 +32,7 @@
 | --- | --- |
 | 系统 | macOS 14 Sonoma 或更高（菜单用到 `NSMenuItem.sectionHeader`） |
 | 构建 | Xcode Command Line Tools（`xcode-select --install`），不需要完整 Xcode |
-| 服务端 | 一个 sub2api 实例，以及它的**管理 API Key**（`admin-` 开头） |
+| 服务端 | 一个 sub2api 实例，以及它的**旧版全权管理 API Key**（`admin-` 开头）或**管理员邮箱密码** |
 
 ## 安装
 
@@ -82,7 +82,15 @@ cp -R "build/Sub2API Quota.app" /Applications/
 
 三种方式，改的是同一个文件。
 
-**图形界面** —— 菜单栏图标 → `设置…`（`⌘,`），填服务地址和管理 API Key，可以先「测试连接」。
+**图形界面** —— 菜单栏图标 → `设置…`（`⌘,`），先选认证方式，可以先「测试连接」：
+
+- **管理员 API Key**：填服务地址和**旧版全权**管理 API Key（`admin-…`）。这是兼容旧版 sub2api 的方式。
+- **管理员登录**：填服务地址、管理员邮箱和密码，点「登录」。密码只用于换取令牌，不会保存；
+  access / refresh token 存在配置文件里（0600），过期会自动续期。开了两步验证会要求输入 6 位验证码。
+
+> sub2api 0.2.19 起新界面默认只能创建受限管理密钥（`adm_sc_…`）。受限密钥可以读账号列表，
+> 但 sub2api 没有把账号用量接口登记进受限密钥的权限目录，所以读配额会返回 403。
+> 这时请用「管理员登录」；旧版全权密钥仍然可用，但新版后台不再提供新建入口。
 
 **命令行**
 
@@ -92,6 +100,9 @@ sub2api-bar --endpoint https://sub2api.example.com --api-key admin-xxxxxxxx
 sub2api-bar --accounts      # 列出服务上的账号
 sub2api-bar --dump          # 用当前配置打一遍接口，把拿到的数据打出来
 sub2api-bar --help
+
+# 无界面登录（令牌写入配置，密码不落盘）
+SUB2API_ADMIN_EMAIL=admin@example.com SUB2API_ADMIN_PASSWORD='…' sub2api-bar --login
 ```
 
 源码构建的话可执行文件在 `build/Sub2API Quota.app/Contents/MacOS/Sub2APIQuota`，参数一样。
@@ -101,7 +112,12 @@ sub2api-bar --help
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
 | `endpoint` | `""` | sub2api 服务地址，结尾斜杠会自动去掉 |
-| `api_key` | `""` | 管理 API Key，通过 `X-Api-Key` 头发送 |
+| `auth_mode` | `"api_key"` | `api_key`（旧版全权密钥）或 `login`（管理员登录换 JWT） |
+| `api_key` | `""` | 旧版全权管理 API Key，通过 `X-Api-Key` 头发送 |
+| `admin_email` | `""` | 管理员登录用的邮箱，仅用于显示和再次登录 |
+| `access_token` | `""` | 管理员登录换来的 JWT，`login` 模式下自动续期 |
+| `refresh_token` | `""` | 刷新 JWT 用的 refresh token |
+| `token_expires_at` | `0` | access token 过期时间（Unix 时间戳），`0` = 未登录 |
 | `account_id` | `0` | 监控哪个账号，`0` = 首次刷新时自动选 |
 | `display_mode` | `"auto"` | `auto` / `five_hour` / `seven_day` / `seven_day_opus` / `seven_day_fable` / `seven_day_sonnet` |
 | `refresh_interval` | `60` | 轮询间隔（秒），最小 15 |
@@ -140,6 +156,19 @@ sub2api-bar --help
 - **7 天滚动窗口的起点** = 该窗口的重置时间往前推 7 天。Claude / Codex 的额度就是这么滚的，所以「计费周期」默认跟着它，和额度重置时刻天然对齐。
 - **周期用量是自然日累加的**。sub2api 的历史接口只有自然日粒度，周期起点不在 00:00 时结果会偏大，这种情况界面上会标成「近似」，不假装精确。
 
+### 关于认证
+
+旧版 sub2api 只有一个全权管理密钥，`X-Api-Key` 一发就什么都能读。新版引入了受限管理密钥
+（`adm_sc_` 开头），按接口和方法精确授权；但账号用量接口目前没有出现在受限密钥的权限目录里，
+所以受限密钥读账号列表没问题，读 5h / 7d 配额一定 403。
+
+app 因此保留了两条路：
+
+1. **旧版全权 API Key**：继续走 `X-Api-Key`，旧服务器和旧密钥都不受影响。
+2. **管理员登录**：走 `POST /api/v1/auth/login` 换 JWT，再用 `Authorization: Bearer` 调管理接口。
+   refresh token 30 天有效且每次刷新都会轮换；app 会在 access token 快过期或接口返回 401 时自动续期。
+   密码只在登录那一次使用，不写入配置文件。
+
 凭据存在 `~/.config/sub2api-quota/config.json`（0600），没有走钥匙串：这个 app 是本地 ad-hoc 签名的，每次重新编译签名都变，钥匙串会因为身份对不上而拒绝读取，反而更难用。
 
 ## 开发
@@ -147,15 +176,17 @@ sub2api-bar --help
 ```
 Sources/
 ├── main.swift                    入口，命令行参数优先于界面
-├── CLI.swift                     --endpoint / --api-key / --dump / --accounts
+├── CLI.swift                     --endpoint / --api-key / --login / --dump / --accounts
 ├── Settings.swift                配置读写（JSON, 0600）
-├── APIClient.swift               sub2api 管理接口
+├── Auth.swift                    管理员登录、token 刷新、2FA
+├── APIClient.swift               sub2api 管理接口（API Key / Bearer 两种认证）
 ├── Models.swift                  账号 / 用量窗口 / 统计
 ├── SnapshotLoader.swift          一次刷新拉齐所有数据
 ├── StatusItemController.swift    菜单栏项与菜单
 ├── MenuViews.swift               菜单里的自定义行视图
 ├── GaugeIcon.swift               菜单栏模板图标
-├── SettingsWindowController.swift 设置窗口
+├── SettingsWindowController.swift 设置窗口（认证方式 / 登录 / 测试连接）
+├── MainMenu.swift                 主菜单（让设置窗口支持 ⌘C/⌘V/⌘X/⌘A/⌘Z）
 ├── Report.swift                  悬停提示 / 终端报表
 ├── Util.swift                    格式化与计费周期计算
 └── Log.swift                     ~/.config/sub2api-quota/ 下的运行日志

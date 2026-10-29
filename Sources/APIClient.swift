@@ -2,18 +2,41 @@ import Foundation
 
 struct APIError: LocalizedError {
     let message: String
+    var status: Int?
+    var code: String?
+
+    init(_ message: String, status: Int? = nil, code: String? = nil) {
+        self.message = message
+        self.status = status
+        self.code = code
+    }
+
     var errorDescription: String? { message }
+    var isUnauthorized: Bool { status == 401 }
+    var isForbidden: Bool { status == 403 || code == "FORBIDDEN" }
 }
 
-/// sub2api 管理接口客户端。认证头是 X-Api-Key（不是 Authorization）。
+/// sub2api 管理接口客户端。
+///
+/// 认证有两种：
+/// - 旧版全权管理员 API Key：`X-Api-Key`
+/// - 管理员登录换来的 JWT：`Authorization: Bearer`
+///
+/// 新版的受限管理密钥（`adm_sc_`）虽然也能走 `X-Api-Key`，但 sub2api 没有把
+/// 账号用量接口登记进受限密钥的权限目录，所以只能读账号列表，读不到配额。
 final class APIClient: @unchecked Sendable {
+    enum Auth {
+        case apiKey(String)
+        case bearer(String)
+    }
+
     private let endpoint: String
-    private let apiKey: String
+    private let auth: Auth
     private let session: URLSession
 
-    init(endpoint: String, apiKey: String) {
+    init(endpoint: String, auth: Auth) {
         self.endpoint = endpoint
-        self.apiKey = apiKey
+        self.auth = auth
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 20
         cfg.timeoutIntervalForResource = 30
@@ -21,20 +44,29 @@ final class APIClient: @unchecked Sendable {
         self.session = URLSession(configuration: cfg)
     }
 
+    convenience init(endpoint: String, apiKey: String) {
+        self.init(endpoint: endpoint, auth: .apiKey(apiKey))
+    }
+
     // MARK: - 请求
 
     private func request(_ method: String, _ path: String, query: [String: String] = [:], body: [String: Any]? = nil) throws -> URLRequest {
         guard var comps = URLComponents(string: endpoint + "/api/v1" + path) else {
-            throw APIError(message: "地址无效：\(endpoint)")
+            throw APIError("地址无效：\(endpoint)")
         }
         if !query.isEmpty {
             comps.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
         }
-        guard let url = comps.url else { throw APIError(message: "地址无效：\(endpoint)") }
+        guard let url = comps.url else { throw APIError("地址无效：\(endpoint)") }
 
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.setValue(apiKey, forHTTPHeaderField: "X-Api-Key")
+        switch auth {
+        case .apiKey(let key):
+            req.setValue(key, forHTTPHeaderField: "X-Api-Key")
+        case .bearer(let token):
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -49,24 +81,68 @@ final class APIClient: @unchecked Sendable {
         do {
             (data, resp) = try await session.data(for: req)
         } catch {
-            throw APIError(message: "网络错误：\(error.localizedDescription)")
+            throw APIError("网络错误：\(error.localizedDescription)")
         }
         let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        return try APIClient.decode(data, status: status)
+    }
 
-        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            if status == 404 { throw APIError(message: "接口不存在 (404)，请检查服务地址") }
-            throw APIError(message: "返回不是 JSON (HTTP \(status))")
+    /// 不带头地打 `/api/v1/auth/*`，登录/刷新令牌用。
+    static func rawPOST(endpoint: String, path: String, body: [String: Any]) async throws -> Any {
+        guard let url = URL(string: endpoint + "/api/v1" + path) else {
+            throw APIError("地址无效：\(endpoint)")
         }
-        // 成功时 code 是数字 0；失败时 code 是字符串错误码，如 INVALID_TOKEN
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.setValue("application/json", forHTTPHeaderField: "Accept")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        req.timeoutInterval = 20
+
+        let (data, resp): (Data, URLResponse)
+        do {
+            (data, resp) = try await URLSession.shared.data(for: req)
+        } catch {
+            throw APIError("网络错误：\(error.localizedDescription)")
+        }
+        let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        return try decode(data, status: status)
+    }
+
+    private static func decode(_ data: Data, status: Int) throws -> Any {
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            if status == 404 { throw APIError("接口不存在 (404)，请检查服务地址", status: status) }
+            throw APIError("返回不是 JSON (HTTP \(status))", status: status)
+        }
+        // 成功时 code 是数字 0；失败时 code 可能是字符串错误码（如 FORBIDDEN），
+        // 也可能是 HTTP 状态码 + reason（如 401 + INVALID_CREDENTIALS）。
         if let code = obj["code"] as? String, !code.isEmpty {
             let msg = obj["message"] as? String ?? code
-            throw APIError(message: code == "INVALID_TOKEN" || code == "UNAUTHORIZED" ? "API Key 无效或权限不足" : "\(code)：\(msg)")
+            let text: String
+            switch code {
+            case "INVALID_TOKEN", "UNAUTHORIZED":
+                text = "API Key 或登录令牌无效或权限不足"
+            default:
+                text = "\(code)：\(msg)"
+            }
+            throw APIError(text, status: status, code: code)
         }
         if let code = obj["code"] as? Int, code != 0 {
-            throw APIError(message: obj["message"] as? String ?? "接口返回 code=\(code)")
+            let reason = obj["reason"] as? String
+            let msg = obj["message"] as? String ?? "接口返回 code=\(code)"
+            let text: String
+            switch reason {
+            case "INVALID_CREDENTIALS":
+                text = "邮箱或密码不正确"
+            case "REFRESH_TOKEN_INVALID", "REFRESH_TOKEN_EXPIRED":
+                text = "登录已过期，请重新登录"
+            default:
+                text = msg
+            }
+            throw APIError(text, status: status, code: reason)
         }
-        guard status < 400 else { throw APIError(message: "HTTP \(status)") }
-        guard let data = obj["data"] else { throw APIError(message: "返回缺少 data 字段") }
+        guard status < 400 else { throw APIError("HTTP \(status)", status: status) }
+        guard let data = obj["data"] else { throw APIError("返回缺少 data 字段", status: status) }
         return data
     }
 

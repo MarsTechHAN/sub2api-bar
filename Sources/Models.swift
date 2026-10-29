@@ -189,4 +189,7 @@ struct Snapshot {
     var cycle: CycleStats?
     var fetchedAt: Date = Date()
     var errorMessage: String?
+    /// 今日用量 / 计费周期单独失败时保留原因，别让一部分接口失败把整份报表吞掉。
+    var todayError: String?
+    var cycleError: String?
 }

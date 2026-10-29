@@ -45,6 +45,24 @@ enum CycleMode: Equatable {
     }
 }
 
+/// 管理接口的认证方式。
+///
+/// - `apiKey`：旧版全权管理员 API Key，走 `X-Api-Key`。sub2api 0.2.19 起新建的
+///   受限密钥（`adm_sc_` 开头）没有账号用量接口的权限，因此只对旧版全权密钥有效。
+/// - `login`：管理员邮箱密码登录换取 JWT，走 `Authorization: Bearer`。受限密钥
+///   读不到用量时用这个。密码只用于换令牌，不落盘；access/refresh token 存在配置文件里。
+enum AuthMode: String {
+    case apiKey = "api_key"
+    case login = "login"
+
+    var label: String {
+        switch self {
+        case .apiKey: return "管理员 API Key"
+        case .login: return "管理员登录"
+        }
+    }
+}
+
 /// 全部配置落在 ~/.config/sub2api-quota/config.json，权限 0600，可以直接手改。
 /// 没走钥匙串：这个 app 是本地自己编译的 ad-hoc 签名，每次重新编译代码签名都变，
 /// 钥匙串会因为身份对不上而拒绝读取，反而更难用。
@@ -55,6 +73,8 @@ final class Settings {
         .appendingPathComponent(".config/sub2api-quota", isDirectory: true)
     static let fileURL = directory.appendingPathComponent("config.json")
 
+    /// 定时刷新在后台线程，登录令牌也可能在任意 async 任务里更新，store 要加锁。
+    private let lock = NSRecursiveLock()
     private var store: [String: Any]
 
     private init() {
@@ -74,7 +94,12 @@ final class Settings {
     private func fillDefaults() {
         let defaults: [String: Any] = [
             "endpoint": "",
+            "auth_mode": "api_key",       // api_key（旧版全权密钥）| login（管理员邮箱密码登录）
             "api_key": "",
+            "admin_email": "",
+            "access_token": "",
+            "refresh_token": "",
+            "token_expires_at": 0.0,      // Unix 时间戳；0 = 没有登录态
             "account_id": 0,
             "display_mode": "auto",       // auto | five_hour | seven_day | seven_day_fable | seven_day_sonnet | seven_day_opus
             "refresh_interval": 60,       // 秒，最小 15
@@ -88,6 +113,8 @@ final class Settings {
     }
 
     private func save() {
+        lock.lock()
+        defer { lock.unlock() }
         fillDefaults()
         let fm = FileManager.default
         try? fm.createDirectory(at: Settings.directory, withIntermediateDirectories: true,
@@ -106,30 +133,42 @@ final class Settings {
 
     /// 外部（比如用户手改了文件）改动后重新读一次
     func reload() {
+        lock.lock()
+        defer { lock.unlock() }
         store = Settings.loadFromDisk() ?? [:]
     }
 
     private func string(_ key: String, _ fallback: String) -> String {
-        (store[key] as? String) ?? fallback
+        lock.lock()
+        defer { lock.unlock() }
+        return (store[key] as? String) ?? fallback
     }
 
     private func int(_ key: String, _ fallback: Int) -> Int {
+        lock.lock()
+        defer { lock.unlock() }
         if let v = store[key] as? Int { return v }
         if let v = store[key] as? Double { return Int(v) }
         return fallback
     }
 
     private func double(_ key: String, _ fallback: Double) -> Double {
+        lock.lock()
+        defer { lock.unlock() }
         if let v = store[key] as? Double { return v }
         if let v = store[key] as? Int { return Double(v) }
         return fallback
     }
 
     private func bool(_ key: String, _ fallback: Bool) -> Bool {
-        (store[key] as? Bool) ?? fallback
+        lock.lock()
+        defer { lock.unlock() }
+        return (store[key] as? Bool) ?? fallback
     }
 
     private func set(_ key: String, _ value: Any) {
+        lock.lock()
+        defer { lock.unlock() }
         store[key] = value
         save()
     }
@@ -142,10 +181,73 @@ final class Settings {
         set { set("endpoint", Settings.normalize(newValue)) }
     }
 
-    /// sub2api 的管理 API Key（admin-… 开头），通过 X-Api-Key 头发送
+    var authMode: AuthMode {
+        get { AuthMode(rawValue: string("auth_mode", "api_key")) ?? .apiKey }
+        set { set("auth_mode", newValue.rawValue) }
+    }
+
+    /// 旧版全权管理员 API Key（`admin-…`），通过 X-Api-Key 头发送。
+    /// sub2api 0.2.19 的受限密钥是 `adm_sc_…`，没有用量接口权限，读不到配额。
     var apiKey: String {
         get { string("api_key", "") }
         set { set("api_key", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    /// 管理员登录用的邮箱。密码不保存，只保存登录换来的 token。
+    var adminEmail: String {
+        get { string("admin_email", "") }
+        set { set("admin_email", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
+    }
+
+    var accessToken: String {
+        get { string("access_token", "") }
+        set { set("access_token", newValue) }
+    }
+
+    var refreshToken: String {
+        get { string("refresh_token", "") }
+        set { set("refresh_token", newValue) }
+    }
+
+    var tokenExpiresAt: Date? {
+        lock.lock()
+        defer { lock.unlock() }
+        let t: Double
+        if let v = store["token_expires_at"] as? Double { t = v }
+        else if let v = store["token_expires_at"] as? Int { t = Double(v) }
+        else { t = 0 }
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+
+    var hasLoginSession: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        let access = store["access_token"] as? String ?? ""
+        let refresh = store["refresh_token"] as? String ?? ""
+        return !access.isEmpty || !refresh.isEmpty
+    }
+
+    /// 登录成功后原子地写入令牌。refresh 为空时保留旧的（兼容服务端不回新 refresh token 的版本）。
+    func saveTokens(_ tokens: AuthTokens) {
+        lock.lock()
+        defer { lock.unlock() }
+        store["access_token"] = tokens.accessToken
+        if !tokens.refreshToken.isEmpty {
+            store["refresh_token"] = tokens.refreshToken
+        }
+        store["token_expires_at"] = Date()
+            .addingTimeInterval(TimeInterval(max(0, tokens.expiresIn)))
+            .timeIntervalSince1970
+        save()
+    }
+
+    func clearLoginSession() {
+        lock.lock()
+        defer { lock.unlock() }
+        store["access_token"] = ""
+        store["refresh_token"] = ""
+        store["token_expires_at"] = 0.0
+        save()
     }
 
     var accountID: Int {
@@ -192,7 +294,13 @@ final class Settings {
         set { set("title_align", newValue ? "right" : "left") }
     }
 
-    var isConfigured: Bool { !endpoint.isEmpty && !apiKey.isEmpty }
+    var isConfigured: Bool {
+        guard !endpoint.isEmpty else { return false }
+        switch authMode {
+        case .apiKey: return !apiKey.isEmpty
+        case .login: return hasLoginSession
+        }
+    }
 
     static func normalize(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)

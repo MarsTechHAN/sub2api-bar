@@ -34,7 +34,11 @@ enum Report {
         lines.append("")
 
         lines.append("今日用量")
-        lines.append("  " + s.today.line)
+        if let e = s.todayError {
+            lines.append("  ⚠️ \(e)")
+        } else {
+            lines.append("  " + s.today.line)
+        }
         lines.append("")
 
         lines.append("计费周期")
@@ -44,6 +48,8 @@ enum Report {
             if c.approximate {
                 lines.append("  历史只有整日粒度，起点当天被整天计入，金额略偏大")
             }
+        } else if let e = s.cycleError {
+            lines.append("  ⚠️ \(e)")
         } else {
             lines.append("  暂无数据")
         }
