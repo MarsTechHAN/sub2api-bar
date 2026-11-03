@@ -51,92 +51,99 @@ enum AuthAPI {
     }
 }
 
-/// 同一时刻只允许一个刷新请求。refresh token 会轮换，并发刷新会让后一个请求
+/// 同一台服务器同一时刻只允许一个刷新请求。refresh token 会轮换，并发刷新会让后一个请求
 /// 拿着已作废的旧 token 去换，直接把登录态弄丢。
 actor TokenGate {
     static let shared = TokenGate()
-    private var inFlight: Task<Void, Error>?
+    private var inFlight: [String: Task<Void, Error>] = [:]
 
-    func coalesce(_ operation: @escaping @Sendable () async throws -> Void) async throws {
-        if let inFlight { return try await inFlight.value }
+    func coalesce(_ key: String, _ operation: @escaping @Sendable () async throws -> Void) async throws {
+        if let task = inFlight[key] { return try await task.value }
         let task = Task { try await operation() }
-        inFlight = task
-        defer { inFlight = nil }
+        inFlight[key] = task
+        defer { inFlight[key] = nil }
         try await task.value
     }
 }
 
-/// 根据配置决定这次请求用哪种认证，并在登录模式下自动续期。
+/// 根据服务器配置决定这次请求用哪种认证，并在登录模式下自动续期。
 enum AuthManager {
-    static var isLoginMode: Bool { Settings.shared.authMode == .login }
-
-    static func currentAuth(endpoint: String) async throws -> APIClient.Auth {
-        let s = Settings.shared
+    static func currentAuth(serverID: String) async throws -> APIClient.Auth {
+        guard let s = Settings.shared.server(serverID) else { throw APIError("服务器已被删除") }
         switch s.authMode {
         case .apiKey:
             guard !s.apiKey.isEmpty else { throw APIError("未配置管理 API Key") }
             return .apiKey(s.apiKey)
         case .login:
-            try await ensureFreshToken(endpoint: endpoint)
-            let token = Settings.shared.accessToken
-            guard !token.isEmpty else {
-                throw APIError("管理员登录已失效，请到设置里重新登录")
-            }
-            return .bearer(token)
+            try await ensureFreshToken(serverID: serverID, endpoint: s.endpoint)
+            return try bearer(serverID)
         }
     }
 
-    /// 登录模式下的 access token 快过期时自动用 refresh token 续期。
-    static func ensureFreshToken(endpoint: String, force: Bool = false) async throws {
-        guard isLoginMode else { return }
-        let s = Settings.shared
-        if !force, !s.accessToken.isEmpty,
-           let exp = s.tokenExpiresAt, exp.timeIntervalSinceNow > 120 {
-            return
+    private static func bearer(_ serverID: String) throws -> APIClient.Auth {
+        let token = Settings.shared.server(serverID)?.accessToken ?? ""
+        guard !token.isEmpty else { throw APIError("登录已失效，请到设置里重新登录") }
+        return .bearer(token)
+    }
+
+    /// access token 快过期时自动用 refresh token 续期。
+    /// endpoint 单独传：设置窗口里测试连接时，地址可能还没保存。
+    static func ensureFreshToken(serverID: String, endpoint: String, force: Bool = false) async throws {
+        guard let s = Settings.shared.server(serverID) else { throw APIError("服务器已被删除") }
+        let normalized = Settings.normalize(endpoint)
+
+        // 令牌是服务地址私有的：换了地址就不能再拿旧令牌去请求，
+        // 否则 access token / refresh token 会被发给另一个服务。
+        if s.tokenEndpoint.isEmpty {
+            // 老配置没有 token_endpoint，第一次运行时按当前地址补上
+            if s.hasLoginSession {
+                Settings.shared.updateServer(serverID) { $0.tokenEndpoint = normalized }
+            }
+        } else if s.tokenEndpoint != normalized {
+            throw APIError("服务地址已更改，请重新登录")
         }
-        try await TokenGate.shared.coalesce {
-            let s = Settings.shared
-            if !force, !s.accessToken.isEmpty,
-               let exp = s.tokenExpiresAt, exp.timeIntervalSinceNow > 120 {
-                return
-            }
-            let refresh = s.refreshToken
+
+        @Sendable func fresh(_ s: ServerConfig?) -> Bool {
+            guard let s, !s.accessToken.isEmpty, let exp = s.tokenExpiryDate else { return false }
+            return exp.timeIntervalSinceNow > 120
+        }
+        if !force, fresh(s) { return }
+        try await TokenGate.shared.coalesce(serverID) {
+            let s = Settings.shared.server(serverID)
+            if !force, fresh(s) { return }
+            let refresh = s?.refreshToken ?? ""
             guard !refresh.isEmpty else {
-                throw APIError("管理员登录已过期，请到设置里重新登录")
+                throw APIError("登录已过期，请到设置里重新登录")
             }
-            let tokens = try await AuthAPI.refresh(endpoint: endpoint, refreshToken: refresh)
-            Settings.shared.saveTokens(tokens)
+            let tokens = try await AuthAPI.refresh(endpoint: normalized, refreshToken: refresh)
+            Settings.shared.saveTokens(tokens, endpoint: normalized, serverID: serverID)
         }
     }
 
     /// 服务端返回 401 时强制换一次 token，再重试请求。
-    static func refreshAfterUnauthorized(endpoint: String) async throws -> APIClient.Auth {
-        guard isLoginMode else {
+    static func refreshAfterUnauthorized(serverID: String) async throws -> APIClient.Auth {
+        guard let s = Settings.shared.server(serverID), s.authMode == .login else {
             throw APIError("管理 API Key 无效或权限不足")
         }
-        try await ensureFreshToken(endpoint: endpoint, force: true)
-        let token = Settings.shared.accessToken
-        guard !token.isEmpty else {
-            throw APIError("管理员登录已失效，请到设置里重新登录")
-        }
-        return .bearer(token)
+        try await ensureFreshToken(serverID: serverID, endpoint: s.endpoint, force: true)
+        return try bearer(serverID)
     }
 
     @discardableResult
-    static func login(endpoint: String, email: String, password: String) async throws -> LoginOutcome {
+    static func login(serverID: String, endpoint: String, email: String, password: String) async throws -> LoginOutcome {
         let outcome = try await AuthAPI.login(endpoint: endpoint, email: email, password: password)
         if case .tokens(let tokens) = outcome {
-            Settings.shared.saveTokens(tokens)
+            Settings.shared.saveTokens(tokens, endpoint: endpoint, serverID: serverID)
         }
         return outcome
     }
 
-    static func complete2FA(endpoint: String, tempToken: String, code: String) async throws {
+    static func complete2FA(serverID: String, endpoint: String, tempToken: String, code: String) async throws {
         let tokens = try await AuthAPI.verify2FA(endpoint: endpoint, tempToken: tempToken, code: code)
-        Settings.shared.saveTokens(tokens)
+        Settings.shared.saveTokens(tokens, endpoint: endpoint, serverID: serverID)
     }
 
-    static func logout() {
-        Settings.shared.clearLoginSession()
+    static func logout(serverID: String) {
+        Settings.shared.clearLoginSession(serverID: serverID)
     }
 }

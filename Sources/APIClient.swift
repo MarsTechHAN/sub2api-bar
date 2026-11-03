@@ -187,24 +187,63 @@ final class APIClient: @unchecked Sendable {
         return UsageStats(json: single as? [String: Any] ?? [:])
     }
 
-    /// sub2api 的历史接口只有自然日粒度，所以周期用量 = 从 start 所在自然日起累加。
-    /// start 不在 00:00 时结果偏大，用 approximate 标出来，不假装精确。
-    func fetchCycleStats(accountID: Int, start: Date, basis: String) async throws -> CycleStats {
-        let days = BillingCycle.daysElapsed(since: start)
-        let data = try await send(try request("GET", "/admin/accounts/\(accountID)/stats", query: ["days": "\(days)"]))
-        let history = (data as? [String: Any])?["history"] as? [[String: Any]] ?? []
-        let startDay = Fmt.isoDay.string(from: start)
+    /// 统计接口只认自然日，按本机时区切日，和下面的日期字符串对齐。
+    private static var timezone: String { TimeZone.current.identifier }
 
-        var agg = UsageStats()
-        for row in history {
-            guard let day = row["date"] as? String, day >= startDay else { continue }
-            agg.requests += row["requests"] as? Int ?? 0
-            agg.tokens += row["tokens"] as? Int ?? 0
-            if let c = row["cost"] as? Double { agg.cost += c }
-            else if let c = row["cost"] as? Int { agg.cost += Double(c) }
+    /// `[fromDay 00:00, toDay 24:00)` 的整日汇总，日期是 `yyyy-MM-dd`。
+    func fetchDayRangeStats(accountID: Int, fromDay: String, toDay: String) async throws -> UsageStats {
+        let data = try await send(try request("GET", "/admin/usage/stats", query: [
+            "account_id": "\(accountID)",
+            "start_date": fromDay,
+            "end_date": toDay,
+            "timezone": APIClient.timezone,
+        ]))
+        let d = data as? [String: Any] ?? [:]
+        var out = UsageStats()
+        out.requests = d["total_requests"] as? Int ?? 0
+        out.tokens = d["total_tokens"] as? Int ?? 0
+        out.cost = APIClient.number(d["total_actual_cost"] ?? d["total_cost"])
+        return out
+    }
+
+    /// 某一天里 `since` 之后的请求逐条累加。只用来补窗口起点所在那一天的零头。
+    func fetchLogStats(accountID: Int, day: String, since: Date) async throws -> UsageStats {
+        var out = UsageStats()
+        var page = 1
+        while page <= 50 {
+            let data = try await send(try request("GET", "/admin/usage", query: [
+                "account_id": "\(accountID)",
+                "start_date": day,
+                "end_date": day,
+                "timezone": APIClient.timezone,
+                "page": "\(page)",
+                "page_size": "1000",
+                "sort_by": "created_at",
+                "sort_order": "desc",
+            ]))
+            let d = data as? [String: Any] ?? [:]
+            let items = d["items"] as? [[String: Any]] ?? []
+            var reachedStart = false
+            for row in items {
+                guard let at = DateParse.date(from: row["created_at"]) else { continue }
+                // 倒序：一旦早于起点，后面的都更早
+                if at < since { reachedStart = true; break }
+                out.requests += 1
+                out.tokens += ["input_tokens", "output_tokens", "cache_creation_tokens", "cache_read_tokens"]
+                    .reduce(0) { $0 + (row[$1] as? Int ?? 0) }
+                out.cost += APIClient.number(row["actual_cost"] ?? row["total_cost"])
+            }
+            let pages = d["pages"] as? Int ?? 1
+            if reachedStart || items.isEmpty || page >= pages { break }
+            page += 1
         }
-        let midnight = Calendar.current.startOfDay(for: start) == start
-        return CycleStats(start: start, end: Date(), stats: agg, basis: basis, approximate: !midnight)
+        return out
+    }
+
+    private static func number(_ any: Any?) -> Double {
+        if let v = any as? Double { return v }
+        if let v = any as? Int { return Double(v) }
+        return 0
     }
 
     /// 设置界面的“测试连接”，返回账号数。

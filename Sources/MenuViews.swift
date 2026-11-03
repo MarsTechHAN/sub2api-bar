@@ -32,11 +32,12 @@ enum MenuViews {
     static let trailing: CGFloat = 16
     static var contentWidth: CGFloat { width - leading - trailing }
 
-    static func color(for utilization: Double) -> NSColor {
+    /// 快用完时一律转橙 / 红；平时用服务器自己的颜色（单台服务器时是系统强调色）。
+    static func color(for utilization: Double, base: NSColor = .controlAccentColor) -> NSColor {
         switch utilization {
         case 90...: return .systemRed
         case 75..<90: return .systemOrange
-        default: return .controlAccentColor
+        default: return base
         }
     }
 
@@ -51,29 +52,26 @@ enum MenuViews {
         return f
     }
 
-    /// 顶部账号信息：名称 + 平台 / 邮箱 / 分组
-    static func accountHeader(_ account: Account?, subtitle fallback: String) -> NSView {
+    /// 服务器 / 账号的抬头：标题 + 一行灰字。多台服务器时标题前挂一个服务器颜色的圆点。
+    static func header(title: String, subtitle: String, color dotColor: NSColor? = nil) -> NSView {
         let container = FlippedView()
         var y: CGFloat = 8
+        var x = leading
 
-        let title = label(account?.displayName ?? "sub2api 配额",
-                          font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor)
-        title.frame = NSRect(x: leading, y: y, width: contentWidth, height: 17)
-        container.addSubview(title)
+        if let dotColor {
+            let dot = NSImageView(image: ServerColor.dot(dotColor))
+            dot.frame = NSRect(x: leading, y: y + 4, width: 9, height: 9)
+            container.addSubview(dot)
+            x += 15
+        }
+        let t = label(title, font: .systemFont(ofSize: 13, weight: .semibold), color: .labelColor)
+        t.frame = NSRect(x: x, y: y, width: contentWidth - (x - leading), height: 17)
+        container.addSubview(t)
         y += 18
 
-        var bits: [String] = []
-        if let a = account {
-            bits.append("\(a.platform)/\(a.type)")
-            if let e = a.email, !e.isEmpty { bits.append(e) }
-            bits.append(contentsOf: a.groups)
-        } else if !fallback.isEmpty {
-            bits.append(fallback)
-        }
-        if !bits.isEmpty {
-            let sub = label(bits.joined(separator: " · "),
-                            font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
-            sub.frame = NSRect(x: leading, y: y, width: contentWidth, height: 14)
+        if !subtitle.isEmpty {
+            let sub = label(subtitle, font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+            sub.frame = NSRect(x: x, y: y, width: contentWidth - (x - leading), height: 14)
             container.addSubview(sub)
             y += 15
         }
@@ -83,9 +81,9 @@ enum MenuViews {
     }
 
     /// 一个用量窗口：名称 · 百分比 / 进度条 / 重置时间与花费
-    static func usageRow(_ w: UsageWindow) -> NSView {
+    static func usageRow(_ w: UsageWindow, base: NSColor = .controlAccentColor) -> NSView {
         let container = FlippedView()
-        let accent = color(for: w.utilization)
+        let accent = color(for: w.utilization, base: base)
         var y: CGFloat = 5
 
         let pct = label(Fmt.percent(w.utilization),
@@ -156,6 +154,25 @@ enum MenuViews {
         y += 15
 
         container.frame = NSRect(x: 0, y: 0, width: width, height: y + 4)
+        return container
+    }
+
+    /// 两栏并排的小统计：上面一行灰色标题，下面是金额。多台服务器时用它压缩篇幅。
+    static func pairRow(_ left: (title: String, value: String),
+                        _ right: (title: String, value: String)) -> NSView {
+        let container = FlippedView()
+        let column = (contentWidth - 12) / 2
+        for (i, cell) in [left, right].enumerated() {
+            let x = leading + CGFloat(i) * (column + 12)
+            let t = label(cell.title, font: .systemFont(ofSize: 11), color: .secondaryLabelColor)
+            t.frame = NSRect(x: x, y: 4, width: column, height: 14)
+            container.addSubview(t)
+            let v = label(cell.value, font: .monospacedDigitSystemFont(ofSize: 13, weight: .medium),
+                          color: .labelColor)
+            v.frame = NSRect(x: x, y: 19, width: column, height: 17)
+            container.addSubview(v)
+        }
+        container.frame = NSRect(x: 0, y: 0, width: width, height: 40)
         return container
     }
 

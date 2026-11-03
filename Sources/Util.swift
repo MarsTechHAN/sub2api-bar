@@ -39,8 +39,12 @@ enum Fmt {
         return f
     }()
 
+    /// 只用于和接口里的 `yyyy-MM-dd` 比较，必须固定成公历 + POSIX 数字，
+    /// 否则系统日历设成佛历/和历时会格式化成别的年份，周期统计直接对不上。
     static let isoDay: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
@@ -127,35 +131,18 @@ enum Fmt {
     }
 }
 
-// MARK: - 计费周期
+// MARK: - 滚动窗口
 
-enum BillingCycle {
+enum RollingWindow {
     /// 7d 窗口的起点 = 重置时间往前推 7 天。Claude / Codex 的额度都是这个滚动窗口。
     static func start(fromSevenDayResetAt resetsAt: Date) -> Date {
         resetsAt.addingTimeInterval(-7 * 86400)
     }
 
-    /// 按“每月 anchorDay 号”切分周期，返回当前周期的起始日（当天 00:00）。
-    static func start(anchorDay: Int, now: Date = Date(), calendar: Calendar = .current) -> Date {
-        let anchor = max(1, min(28, anchorDay))
-        var comps = calendar.dateComponents([.year, .month, .day], from: now)
-        let today = comps.day ?? 1
-        if today < anchor {
-            // 还没到本月账单日，周期从上个月的账单日开始
-            let firstOfThisMonth = calendar.date(from: DateComponents(year: comps.year, month: comps.month, day: 1)) ?? now
-            let prev = calendar.date(byAdding: .month, value: -1, to: firstOfThisMonth) ?? now
-            comps = calendar.dateComponents([.year, .month], from: prev)
-        }
-        comps.day = anchor
-        comps.hour = 0; comps.minute = 0; comps.second = 0
-        return calendar.startOfDay(for: calendar.date(from: comps) ?? now)
-    }
-
-    /// 从周期起点到今天共几个自然日（含今天），用于决定向接口请求多少天的历史。
-    static func daysElapsed(since start: Date, now: Date = Date(), calendar: Calendar = .current) -> Int {
-        let days = calendar.dateComponents([.day],
-                                           from: calendar.startOfDay(for: start),
-                                           to: calendar.startOfDay(for: now)).day ?? 0
-        return max(1, min(400, days + 1))
+    /// 账号没有 7d 窗口时退到“近 7 天”。起点取整点：零头那天的明细能缓存一小时，
+    /// 不用每次轮询都把一整天的请求翻一遍。
+    static func lastSevenDays(now: Date = Date()) -> Date {
+        let t = now.addingTimeInterval(-7 * 86400).timeIntervalSince1970
+        return Date(timeIntervalSince1970: (t / 3600).rounded(.down) * 3600)
     }
 }

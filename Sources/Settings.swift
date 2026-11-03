@@ -17,34 +17,6 @@ enum DisplayMode: Equatable {
     }
 }
 
-/// “计费周期”怎么算。Claude / Codex 的额度是 7 天滚动窗口，默认就跟着它走。
-enum CycleMode: Equatable {
-    case sevenDayWindow
-    case monthly(Int)
-
-    var rawValue: String {
-        switch self {
-        case .sevenDayWindow: return "7d"
-        case .monthly(let d): return "month:\(d)"
-        }
-    }
-
-    init(rawValue: String) {
-        if rawValue.hasPrefix("month:"), let d = Int(rawValue.dropFirst(6)) {
-            self = .monthly(max(1, min(28, d)))
-        } else {
-            self = .sevenDayWindow
-        }
-    }
-
-    var label: String {
-        switch self {
-        case .sevenDayWindow: return "7d 窗口"
-        case .monthly(let d): return "每月 \(d) 号"
-        }
-    }
-}
-
 /// 管理接口的认证方式。
 ///
 /// - `apiKey`：旧版全权管理员 API Key，走 `X-Api-Key`。sub2api 0.2.19 起新建的
@@ -63,6 +35,133 @@ enum AuthMode: String {
     }
 }
 
+/// 服务器上被监控的一个账号。同时监控多个账号时靠颜色区分。
+struct TrackedAccount: Equatable {
+    var id: Int
+    /// 调色板里的名字（blue / green …）或 `#RRGGBB`
+    var color: String
+    var showInBar: Bool
+
+    init(id: Int, color: String, showInBar: Bool = true) {
+        self.id = id
+        self.color = color
+        self.showInBar = showInBar
+    }
+
+    init?(dict d: [String: Any]) {
+        guard let id = (d["id"] as? Int) ?? (d["id"] as? Double).map(Int.init), id > 0 else { return nil }
+        self.init(id: id, color: d["color"] as? String ?? "", showInBar: d["show_in_bar"] as? Bool ?? true)
+    }
+
+    var dict: [String: Any] { ["id": id, "color": color, "show_in_bar": showInBar] }
+}
+
+/// 一台 sub2api 服务器：地址、认证，以及监控其中哪几个账号。
+struct ServerConfig: Equatable {
+    var id: String
+    var name: String
+    var endpoint: String
+    var authMode: AuthMode
+    var apiKey: String
+    var adminEmail: String
+    var accessToken: String
+    var refreshToken: String
+    /// 当前令牌是向哪个服务地址申请的。JWT 是绑定服务的，
+    /// 换了地址还拿旧令牌去请求，等于把凭据发给另一个服务。
+    var tokenEndpoint: String
+    var tokenExpiresAt: Double
+    /// 监控的账号，按添加顺序。空 = 首次刷新时自动选一个
+    var accounts: [TrackedAccount]
+
+    /// 监控多个账号时依次分配的颜色。避开红 / 橙：那两个留给“快用完了”。
+    static let palette = ["blue", "green", "purple", "pink", "teal", "indigo", "brown", "yellow"]
+
+    init(id: String = UUID().uuidString.lowercased(), name: String = "") {
+        self.id = id
+        self.name = name
+        self.endpoint = ""
+        self.authMode = .apiKey
+        self.apiKey = ""
+        self.adminEmail = ""
+        self.accessToken = ""
+        self.refreshToken = ""
+        self.tokenEndpoint = ""
+        self.tokenExpiresAt = 0
+        self.accounts = []
+    }
+
+    init(dict d: [String: Any]) {
+        func str(_ k: String) -> String { d[k] as? String ?? "" }
+        func num(_ k: String) -> Double {
+            if let v = d[k] as? Double { return v }
+            if let v = d[k] as? Int { return Double(v) }
+            return 0
+        }
+        self.init(id: str("id"), name: str("name"))
+        endpoint = Settings.normalize(str("endpoint"))
+        authMode = AuthMode(rawValue: str("auth_mode")) ?? .apiKey
+        apiKey = str("api_key").trimmingCharacters(in: .whitespacesAndNewlines)
+        adminEmail = str("admin_email")
+        accessToken = str("access_token")
+        refreshToken = str("refresh_token")
+        tokenEndpoint = Settings.normalize(str("token_endpoint"))
+        tokenExpiresAt = num("token_expires_at")
+        if let list = d["accounts"] as? [[String: Any]] {
+            accounts = list.compactMap(TrackedAccount.init(dict:))
+        } else if num("account_id") > 0 {
+            // 老格式：一台服务器只监控一个 account_id，颜色和显示开关挂在服务器上
+            accounts = [TrackedAccount(id: Int(num("account_id")), color: str("color"),
+                                       showInBar: d["show_in_bar"] as? Bool ?? true)]
+        }
+    }
+
+    var dict: [String: Any] {
+        [
+            "id": id,
+            "name": name,
+            "endpoint": endpoint,
+            "auth_mode": authMode.rawValue,
+            "api_key": apiKey,
+            "admin_email": adminEmail,
+            "access_token": accessToken,
+            "refresh_token": refreshToken,
+            "token_endpoint": tokenEndpoint,
+            "token_expires_at": tokenExpiresAt,
+            "accounts": accounts.map(\.dict),
+        ]
+    }
+
+    func tracked(_ accountID: Int) -> TrackedAccount? { accounts.first { $0.id == accountID } }
+
+    var hasLoginSession: Bool { !accessToken.isEmpty || !refreshToken.isEmpty }
+
+    var tokenExpiryDate: Date? {
+        tokenExpiresAt > 0 ? Date(timeIntervalSince1970: tokenExpiresAt) : nil
+    }
+
+    var isConfigured: Bool {
+        guard !endpoint.isEmpty else { return false }
+        switch authMode {
+        case .apiKey: return !apiKey.isEmpty
+        case .login: return hasLoginSession
+        }
+    }
+
+    /// 没起名字就用域名
+    var displayName: String {
+        if !name.isEmpty { return name }
+        if let host = URL(string: endpoint)?.host, !host.isEmpty { return host }
+        return "新服务器"
+    }
+
+    mutating func clearLoginSession() {
+        accessToken = ""
+        refreshToken = ""
+        tokenEndpoint = ""
+        tokenExpiresAt = 0
+    }
+}
+
 /// 全部配置落在 ~/.config/sub2api-quota/config.json，权限 0600，可以直接手改。
 /// 没走钥匙串：这个 app 是本地自己编译的 ad-hoc 签名，每次重新编译代码签名都变，
 /// 钥匙串会因为身份对不上而拒绝读取，反而更难用。
@@ -73,12 +172,21 @@ final class Settings {
         .appendingPathComponent(".config/sub2api-quota", isDirectory: true)
     static let fileURL = directory.appendingPathComponent("config.json")
 
+    /// 只有一台服务器时，老版本把它的字段直接平铺在顶层，读到时搬进 servers。
+    private static let legacyServerKeys = [
+        "endpoint", "auth_mode", "api_key", "admin_email", "access_token",
+        "refresh_token", "token_endpoint", "token_expires_at", "account_id",
+    ]
+    /// 已经不用的键，读到就删
+    private static let obsoleteKeys = ["cycle_mode"]
+
     /// 定时刷新在后台线程，登录令牌也可能在任意 async 任务里更新，store 要加锁。
     private let lock = NSRecursiveLock()
     private var store: [String: Any]
 
     private init() {
         store = Settings.loadFromDisk() ?? [:]
+        if migrate() { save() }
     }
 
     // MARK: - 读写
@@ -90,20 +198,59 @@ final class Settings {
         return obj
     }
 
+    /// 旧格式搬进 servers、补上缺的 id。返回 true 表示改过，需要写回。
+    private func migrate() -> Bool {
+        var changed = false
+        if store["servers"] == nil {
+            let hasLegacy = Settings.legacyServerKeys.contains { key in
+                if let s = store[key] as? String { return !s.isEmpty }
+                return store[key] != nil
+            }
+            if hasLegacy {
+                var legacy: [String: Any] = [:]
+                for k in Settings.legacyServerKeys { legacy[k] = store[k] }
+                var server = ServerConfig(dict: legacy)
+                server.id = UUID().uuidString.lowercased()
+                store["servers"] = [server.dict]
+            } else {
+                store["servers"] = [[String: Any]]()
+            }
+            changed = true
+        }
+        for k in Settings.legacyServerKeys + Settings.obsoleteKeys where store[k] != nil {
+            store.removeValue(forKey: k)
+            changed = true
+        }
+        // 手改文件时可能漏写 id / color，补上，否则每次读出来都是新的 id；
+        // 顺带把上一版“一台服务器一个 account_id”的写法换成 accounts 列表
+        let before = rawServers
+        var list = before.map(ServerConfig.init(dict:))
+        var ids = Set<String>()
+        var colors = Set<String>()
+        for i in list.indices {
+            if list[i].id.isEmpty || ids.contains(list[i].id) { list[i].id = UUID().uuidString.lowercased() }
+            ids.insert(list[i].id)
+            for j in list[i].accounts.indices {
+                if list[i].accounts[j].color.isEmpty {
+                    list[i].accounts[j].color = Settings.unusedColor(colors)
+                }
+                colors.insert(list[i].accounts[j].color)
+            }
+        }
+        let after = list.map(\.dict)
+        if !(before as NSArray).isEqual(to: after) {
+            store["servers"] = after
+            changed = true
+        }
+        return changed
+    }
+
     /// 把所有配置项都写全，文件本身就是一份可读的说明。
     private func fillDefaults() {
         let defaults: [String: Any] = [
-            "endpoint": "",
-            "auth_mode": "api_key",       // api_key（旧版全权密钥）| login（管理员邮箱密码登录）
-            "api_key": "",
-            "admin_email": "",
-            "access_token": "",
-            "refresh_token": "",
-            "token_expires_at": 0.0,      // Unix 时间戳；0 = 没有登录态
-            "account_id": 0,
+            "servers": [[String: Any]](),
             "display_mode": "auto",       // auto | five_hour | seven_day | seven_day_fable | seven_day_sonnet | seven_day_opus
             "refresh_interval": 60,       // 秒，最小 15
-            "cycle_mode": "7d",           // 7d（跟随 7 天滚动窗口）| month:N
             "show_gauge": true,
             "show_label": true,
             "title_gap": 5.5,             // 菜单栏里窗口名和百分比之间的间距（pt），普通空格是 3.58
@@ -131,11 +278,19 @@ final class Settings {
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Settings.fileURL.path)
     }
 
-    /// 外部（比如用户手改了文件）改动后重新读一次
+    /// 外部（比如用户手改了文件）改动后重新读一次。
+    /// 文件被删掉时清空配置；但文件读不出来（手改出语法错误、权限暂时不对）
+    /// 时保留上一次可用的配置，避免把内存里的登录令牌一起清掉。
     func reload() {
         lock.lock()
         defer { lock.unlock() }
-        store = Settings.loadFromDisk() ?? [:]
+        guard FileManager.default.fileExists(atPath: Settings.fileURL.path) else {
+            store = [:]
+            return
+        }
+        guard let disk = Settings.loadFromDisk() else { return }
+        store = disk
+        if migrate() { save() }
     }
 
     private func string(_ key: String, _ fallback: String) -> String {
@@ -173,87 +328,111 @@ final class Settings {
         save()
     }
 
-    // MARK: - 配置项
+    // MARK: - 服务器
 
-    /// 服务地址，统一去掉结尾斜杠
-    var endpoint: String {
-        get { string("endpoint", "") }
-        set { set("endpoint", Settings.normalize(newValue)) }
+    private var rawServers: [[String: Any]] {
+        store["servers"] as? [[String: Any]] ?? []
     }
 
-    var authMode: AuthMode {
-        get { AuthMode(rawValue: string("auth_mode", "api_key")) ?? .apiKey }
-        set { set("auth_mode", newValue.rawValue) }
-    }
-
-    /// 旧版全权管理员 API Key（`admin-…`），通过 X-Api-Key 头发送。
-    /// sub2api 0.2.19 的受限密钥是 `adm_sc_…`，没有用量接口权限，读不到配额。
-    var apiKey: String {
-        get { string("api_key", "") }
-        set { set("api_key", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    }
-
-    /// 管理员登录用的邮箱。密码不保存，只保存登录换来的 token。
-    var adminEmail: String {
-        get { string("admin_email", "") }
-        set { set("admin_email", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
-    }
-
-    var accessToken: String {
-        get { string("access_token", "") }
-        set { set("access_token", newValue) }
-    }
-
-    var refreshToken: String {
-        get { string("refresh_token", "") }
-        set { set("refresh_token", newValue) }
-    }
-
-    var tokenExpiresAt: Date? {
+    var servers: [ServerConfig] {
         lock.lock()
         defer { lock.unlock() }
-        let t: Double
-        if let v = store["token_expires_at"] as? Double { t = v }
-        else if let v = store["token_expires_at"] as? Int { t = Double(v) }
-        else { t = 0 }
-        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+        return rawServers.map(ServerConfig.init(dict:))
     }
 
-    var hasLoginSession: Bool {
+    /// 配好了、能拉数据的服务器
+    var configuredServers: [ServerConfig] { servers.filter(\.isConfigured) }
+
+    func server(_ id: String) -> ServerConfig? {
+        servers.first { $0.id == id }
+    }
+
+    /// 读-改-写在同一把锁里完成，令牌刷新和设置窗口同时写也不会互相覆盖。
+    func updateServer(_ id: String, _ body: (inout ServerConfig) -> Void) {
         lock.lock()
         defer { lock.unlock() }
-        let access = store["access_token"] as? String ?? ""
-        let refresh = store["refresh_token"] as? String ?? ""
-        return !access.isEmpty || !refresh.isEmpty
+        var list = servers
+        guard let i = list.firstIndex(where: { $0.id == id }) else { return }
+        body(&list[i])
+        list[i].endpoint = Settings.normalize(list[i].endpoint)
+        list[i].tokenEndpoint = Settings.normalize(list[i].tokenEndpoint)
+        store["servers"] = list.map(\.dict)
+        save()
+    }
+
+    /// 新建一台空服务器，颜色取调色板里第一个还没被占的。
+    @discardableResult
+    func addServer() -> ServerConfig {
+        lock.lock()
+        defer { lock.unlock() }
+        var list = servers
+        let server = ServerConfig()
+        list.append(server)
+        store["servers"] = list.map(\.dict)
+        save()
+        return server
+    }
+
+    /// 调色板里第一个还没被占的颜色；都用过了就从头轮
+    static func unusedColor(_ used: Set<String>) -> String {
+        ServerConfig.palette.first { !used.contains($0) }
+            ?? ServerConfig.palette[used.count % ServerConfig.palette.count]
+    }
+
+    /// 所有服务器上已经分配出去的颜色
+    var usedColors: Set<String> { Set(servers.flatMap { $0.accounts.map(\.color) }) }
+
+    /// 开始 / 停止监控某个账号。新监控的账号自动分一个没用过的颜色。
+    func setTracked(_ accountID: Int, _ on: Bool, serverID: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let color = Settings.unusedColor(usedColors)
+        updateServer(serverID) { s in
+            if on {
+                if s.tracked(accountID) == nil { s.accounts.append(TrackedAccount(id: accountID, color: color)) }
+            } else {
+                s.accounts.removeAll { $0.id == accountID }
+            }
+        }
+    }
+
+    func updateTracked(_ accountID: Int, serverID: String, _ body: (inout TrackedAccount) -> Void) {
+        updateServer(serverID) { s in
+            if let i = s.accounts.firstIndex(where: { $0.id == accountID }) { body(&s.accounts[i]) }
+        }
+    }
+
+    func removeServer(_ id: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        store["servers"] = servers.filter { $0.id != id }.map(\.dict)
+        save()
     }
 
     /// 登录成功后原子地写入令牌。refresh 为空时保留旧的（兼容服务端不回新 refresh token 的版本）。
-    func saveTokens(_ tokens: AuthTokens) {
-        lock.lock()
-        defer { lock.unlock() }
-        store["access_token"] = tokens.accessToken
-        if !tokens.refreshToken.isEmpty {
-            store["refresh_token"] = tokens.refreshToken
+    /// endpoint 要跟令牌一起记下来，避免换服务地址后把旧令牌发过去。
+    func saveTokens(_ tokens: AuthTokens, endpoint: String, serverID: String) {
+        let normalized = Settings.normalize(endpoint)
+        updateServer(serverID) { s in
+            s.accessToken = tokens.accessToken
+            if !tokens.refreshToken.isEmpty {
+                s.refreshToken = tokens.refreshToken
+            } else if !s.tokenEndpoint.isEmpty, s.tokenEndpoint != normalized {
+                // 旧 refresh token 属于另一个服务，不能留着给新地址用
+                s.refreshToken = ""
+            }
+            s.tokenEndpoint = normalized
+            s.tokenExpiresAt = Date()
+                .addingTimeInterval(TimeInterval(max(0, tokens.expiresIn)))
+                .timeIntervalSince1970
         }
-        store["token_expires_at"] = Date()
-            .addingTimeInterval(TimeInterval(max(0, tokens.expiresIn)))
-            .timeIntervalSince1970
-        save()
     }
 
-    func clearLoginSession() {
-        lock.lock()
-        defer { lock.unlock() }
-        store["access_token"] = ""
-        store["refresh_token"] = ""
-        store["token_expires_at"] = 0.0
-        save()
+    func clearLoginSession(serverID: String) {
+        updateServer(serverID) { $0.clearLoginSession() }
     }
 
-    var accountID: Int {
-        get { int("account_id", 0) }
-        set { set("account_id", newValue) }
-    }
+    // MARK: - 全局配置项
 
     var displayMode: DisplayMode {
         get { DisplayMode(rawValue: string("display_mode", "auto")) }
@@ -263,11 +442,6 @@ final class Settings {
     var refreshInterval: Int {
         get { max(15, int("refresh_interval", 60)) }
         set { set("refresh_interval", max(15, newValue)) }
-    }
-
-    var cycleMode: CycleMode {
-        get { CycleMode(rawValue: string("cycle_mode", "7d")) }
-        set { set("cycle_mode", newValue.rawValue) }
     }
 
     var showGauge: Bool {
@@ -294,13 +468,7 @@ final class Settings {
         set { set("title_align", newValue ? "right" : "left") }
     }
 
-    var isConfigured: Bool {
-        guard !endpoint.isEmpty else { return false }
-        switch authMode {
-        case .apiKey: return !apiKey.isEmpty
-        case .login: return hasLoginSession
-        }
-    }
+    var isConfigured: Bool { !configuredServers.isEmpty }
 
     static func normalize(_ raw: String) -> String {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)

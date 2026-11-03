@@ -18,9 +18,10 @@
 
 ## 特性
 
+- **多服务器、多账号** —— 可以同时接入多台 sub2api，每台上勾选任意几个账号一起监控；菜单栏每个账号一个彩色圆环，颜色可以自己挑。只监控一个账号时仍是原来的单色模板图标。
 - **多窗口配额** —— 5h、7d、7d Opus、7d Fable、7d Sonnet，菜单栏显示哪一个可选，也可以交给 `自动`（永远显示占用最高的那个）。
-- **悬停即全貌** —— 用量窗口（占用 / 重置倒计时 / 花费）、今日用量、计费周期用量，一次给全，不用点开。
-- **计费周期可切口径** —— 默认跟随 Claude 的 7 天滚动窗口，也可以按自然月的任意账单日切分。
+- **悬停即全貌** —— 用量窗口（占用 / 重置倒计时 / 花费）、今日用量、本周期用量，一次给全，不用点开。
+- **本周期 = 7 天滚动窗口** —— 从 7d 窗口的起点算到现在，精确到单条请求，和额度重置时刻天然对齐。
 - **按 HIG 画的界面** —— 菜单栏图标是模板图像，浅色/深色、菜单栏染色、失焦变浅、展开时反色全都跟着系统走；菜单用原生分节样式与语义色。
 - **布局不跳动** —— 百分比宽度按两位数钉死，`9% → 10%` 时图标位置和整项宽度纹丝不动。
 - **只读管理接口** —— 自动轮询只走读接口；会触发上游真实探测的强制刷新单独放在菜单里，手动才走。
@@ -107,25 +108,37 @@ SUB2API_ADMIN_EMAIL=admin@example.com SUB2API_ADMIN_PASSWORD='…' sub2api-bar -
 
 源码构建的话可执行文件在 `build/Sub2API Quota.app/Contents/MacOS/Sub2APIQuota`，参数一样。
 
-**直接改文件** —— `~/.config/sub2api-quota/config.json`（权限 600）：
+多台服务器时用 `--server <名称或序号>` 指定改哪一台，名称不存在就新建；`--account-id 1,3` 一次监控多个账号。
+
+**直接改文件** —— `~/.config/sub2api-quota/config.json`（权限 600）。顶层是全局设置，`servers` 里每台服务器一项：
 
 | 键 | 默认值 | 说明 |
 | --- | --- | --- |
+| `servers` | `[]` | 服务器列表，字段见下表 |
+| `display_mode` | `"auto"` | `auto` / `five_hour` / `seven_day` / `seven_day_opus` / `seven_day_fable` / `seven_day_sonnet` |
+| `refresh_interval` | `60` | 轮询间隔（秒），最小 15 |
+| `show_gauge` | `true` | 是否显示环形进度 |
+| `show_label` | `true` | 是否显示窗口名（`7d` / `5h` / `7dF` …） |
+| `title_gap` | `5.5` | 窗口名与百分比之间的间距（pt）。系统字体的普通空格约 3.58pt |
+| `title_align` | `"right"` | 百分比在预留宽度里靠哪边。`right` 把富余空间放在窗口名和数字之间（数字按列对齐），`left` 放在最右边 |
+
+`servers` 里的每一项：
+
+| 键 | 默认值 | 说明 |
+| --- | --- | --- |
+| `id` | 自动生成 | 内部标识，不用改 |
+| `name` | `""` | 显示名，留空用域名 |
 | `endpoint` | `""` | sub2api 服务地址，结尾斜杠会自动去掉 |
 | `auth_mode` | `"api_key"` | `api_key`（旧版全权密钥）或 `login`（管理员登录换 JWT） |
 | `api_key` | `""` | 旧版全权管理 API Key，通过 `X-Api-Key` 头发送 |
 | `admin_email` | `""` | 管理员登录用的邮箱，仅用于显示和再次登录 |
 | `access_token` | `""` | 管理员登录换来的 JWT，`login` 模式下自动续期 |
 | `refresh_token` | `""` | 刷新 JWT 用的 refresh token |
+| `token_endpoint` | `""` | 令牌是从哪个服务地址换来的；换地址后必须重新登录 |
 | `token_expires_at` | `0` | access token 过期时间（Unix 时间戳），`0` = 未登录 |
-| `account_id` | `0` | 监控哪个账号，`0` = 首次刷新时自动选 |
-| `display_mode` | `"auto"` | `auto` / `five_hour` / `seven_day` / `seven_day_opus` / `seven_day_fable` / `seven_day_sonnet` |
-| `refresh_interval` | `60` | 轮询间隔（秒），最小 15 |
-| `cycle_mode` | `"7d"` | `7d` 跟随 7 天滚动窗口，或 `month:N` 按每月 N 号 |
-| `show_gauge` | `true` | 是否显示环形进度 |
-| `show_label` | `true` | 是否显示窗口名（`7d` / `5h` / `7dF` …） |
-| `title_gap` | `5.5` | 窗口名与百分比之间的间距（pt）。系统字体的普通空格约 3.58pt |
-| `title_align` | `"right"` | 百分比在预留宽度里靠哪边。`right` 把富余空间放在窗口名和数字之间（数字按列对齐），`left` 放在最右边 |
+| `accounts` | `[]` | 监控的账号：`{"id": 1, "color": "blue", "show_in_bar": true}`。空 = 首次刷新时自动选一个。`color` 可选 `blue` `green` `purple` `pink` `teal` `indigo` `brown` `yellow`，或 `#RRGGBB` |
+
+旧版本的单服务器配置（顶层 `endpoint` / `account_id` …）首次启动时会自动搬进 `servers`。
 
 手改完不用退出重开，点一下菜单栏图标就会重新读取。
 
@@ -133,11 +146,11 @@ SUB2API_ADMIN_EMAIL=admin@example.com SUB2API_ADMIN_PASSWORD='…' sub2api-bar -
 
 点开菜单栏图标：
 
-- **用量窗口 / 今日用量 / 计费周期** —— 三段只读报表，和悬停提示的内容一致。
-- **账号** —— 按平台分组列出服务上的账号，切换监控对象。
-- **菜单栏显示** —— 选哪个窗口上菜单栏，以及是否显示环形进度 / 窗口名。
-- **刷新间隔** —— 15 秒到 10 分钟。
-- **计费周期口径** —— 跟随 7 天滚动窗口，或指定每月账单日。
+- **用量窗口 / 今日 / 本周期** —— 只读报表，和悬停提示的内容一致。监控多个账号时每个账号一块，带颜色圆点。
+- **监控账号** —— 列出各服务器上的账号，勾选（可多选）要监控的。
+- **菜单栏显示** —— 选哪个窗口上菜单栏、是否显示环形进度 / 窗口名；多个账号时可以单独设置每个账号的颜色和是否上菜单栏。
+- **刷新间隔** —— 30 秒到 15 分钟。
+- **登录时启动** —— 注册到系统「登录项」，设置窗口里也有同样的开关。系统要求手动允许时会直接打开对应的设置页。
 - **立即刷新**（`⌘R`）/ **强制刷新**（`⇧⌘R`，会触发上游真实探测，别频繁用）/ **设置…**（`⌘,`）/ **退出**（`⌘Q`）。
 
 ## 工作原理
@@ -149,12 +162,11 @@ SUB2API_ADMIN_EMAIL=admin@example.com SUB2API_ADMIN_PASSWORD='…' sub2api-bar -
 | `GET /admin/accounts` | 账号列表（也是「测试连接」用的） |
 | `POST /admin/accounts/usage/batch` | 各配额窗口的占用与重置时间 |
 | `POST /admin/accounts/today-stats/batch` | 今日请求数 / token / 花费 |
-| `GET /admin/accounts/{id}/stats?days=N` | 历史按日统计，累加成计费周期用量 |
+| `GET /admin/usage/stats` | 整日区间汇总，算本周期用量 |
+| `GET /admin/usage` | 请求明细，补上窗口起点那天的零头 |
 
-两处口径值得说明：
-
-- **7 天滚动窗口的起点** = 该窗口的重置时间往前推 7 天。Claude / Codex 的额度就是这么滚的，所以「计费周期」默认跟着它，和额度重置时刻天然对齐。
-- **周期用量是自然日累加的**。sub2api 的历史接口只有自然日粒度，周期起点不在 00:00 时结果会偏大，这种情况界面上会标成「近似」，不假装精确。
+**本周期**固定是 7 天滚动窗口：起点 = 7d 窗口的重置时间往前推 7 天（账号没有 7d 窗口时取近 7 天）。
+sub2api 的汇总接口只认自然日，所以拆成两段：起点所在那天的零头逐条累加请求明细，之后的整日走汇总接口，结果精确到单条请求。零头那段已经是过去的时间，按起点缓存，一周只查一次。
 
 ### 关于认证
 
@@ -167,7 +179,7 @@ app 因此保留了两条路：
 1. **旧版全权 API Key**：继续走 `X-Api-Key`，旧服务器和旧密钥都不受影响。
 2. **管理员登录**：走 `POST /api/v1/auth/login` 换 JWT，再用 `Authorization: Bearer` 调管理接口。
    refresh token 30 天有效且每次刷新都会轮换；app 会在 access token 快过期或接口返回 401 时自动续期。
-   密码只在登录那一次使用，不写入配置文件。
+   密码只在登录那一次使用，不写入配置文件。令牌和签发它的服务地址绑定，换了 `endpoint` 需要重新登录一次。
 
 凭据存在 `~/.config/sub2api-quota/config.json`（0600），没有走钥匙串：这个 app 是本地 ad-hoc 签名的，每次重新编译签名都变，钥匙串会因为身份对不上而拒绝读取，反而更难用。
 
@@ -177,7 +189,7 @@ app 因此保留了两条路：
 Sources/
 ├── main.swift                    入口，命令行参数优先于界面
 ├── CLI.swift                     --endpoint / --api-key / --login / --dump / --accounts
-├── Settings.swift                配置读写（JSON, 0600）
+├── Settings.swift                配置读写（JSON, 0600），服务器 / 监控账号
 ├── Auth.swift                    管理员登录、token 刷新、2FA
 ├── APIClient.swift               sub2api 管理接口（API Key / Bearer 两种认证）
 ├── Models.swift                  账号 / 用量窗口 / 统计
@@ -186,9 +198,11 @@ Sources/
 ├── MenuViews.swift               菜单里的自定义行视图
 ├── GaugeIcon.swift               菜单栏模板图标
 ├── SettingsWindowController.swift 设置窗口（认证方式 / 登录 / 测试连接）
+├── LaunchAtLogin.swift            登录时启动（SMAppService）
 ├── MainMenu.swift                 主菜单（让设置窗口支持 ⌘C/⌘V/⌘X/⌘A/⌘Z）
+├── ServerColor.swift             账号颜色（调色板 / #RRGGBB）
 ├── Report.swift                  悬停提示 / 终端报表
-├── Util.swift                    格式化与计费周期计算
+├── Util.swift                    格式化与滚动窗口计算
 └── Log.swift                     ~/.config/sub2api-quota/ 下的运行日志
 ```
 

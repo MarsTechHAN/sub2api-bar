@@ -150,6 +150,14 @@ struct UsageStats {
 
     init() {}
 
+    static func + (a: UsageStats, b: UsageStats) -> UsageStats {
+        var out = a
+        out.requests += b.requests
+        out.tokens += b.tokens
+        out.cost += b.cost
+        return out
+    }
+
     init(json: [String: Any]) {
         requests = json["requests"] as? Int ?? 0
         tokens = json["tokens"] as? Int ?? 0
@@ -162,34 +170,25 @@ struct UsageStats {
     }
 }
 
+/// 本周期用量，固定按 7d 滚动窗口算：从窗口起点到现在，精确到单条请求。
 struct CycleStats {
     let start: Date
-    let end: Date
     let stats: UsageStats
-    /// 周期是怎么定出来的，直接说给用户听
+    /// 窗口是怎么定出来的：“7d 窗口”，账号没有 7d 窗口时是“近 7 天”
     let basis: String
-    /// 起点不在 00:00 时，日粒度的历史会把起点当天整天算进来，数字偏大
-    let approximate: Bool
-
-    var rangeLabel: String {
-        let s = Fmt.shortDateTime.string(from: start)
-        return "\(s) ~ 现在 · \(basis)"
-    }
-
-    var statsLine: String {
-        (approximate ? "≈ " : "") + stats.line
-    }
 }
 
 /// 一次完整刷新的结果
 struct Snapshot {
+    /// 要查的账号 id。账号在服务上被删了时 account 是 nil，靠它说清楚是哪个
+    var accountID: Int = 0
     var account: Account?
     var usage: UsageSnapshot = .empty
     var today: UsageStats = UsageStats()
     var cycle: CycleStats?
     var fetchedAt: Date = Date()
     var errorMessage: String?
-    /// 今日用量 / 计费周期单独失败时保留原因，别让一部分接口失败把整份报表吞掉。
+    /// 今日用量 / 本周期单独失败时保留原因，别让一部分接口失败把整份报表吞掉。
     var todayError: String?
     var cycleError: String?
 }

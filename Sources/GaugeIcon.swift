@@ -5,7 +5,8 @@ import AppKit
 enum GaugeIcon {
 
     /// 环形进度。12 点方向起顺时针。
-    static func ring(progress: Double, diameter: CGFloat = 14) -> NSImage {
+    /// 传了 color 就画成彩色（多台服务器靠颜色区分），否则是跟随系统的模板图像。
+    static func ring(progress: Double, diameter: CGFloat = 14, color: NSColor? = nil) -> NSImage {
         let pct = max(0, min(1, progress))
         let image = NSImage(size: NSSize(width: diameter, height: diameter), flipped: false) { rect in
             let lineWidth: CGFloat = 1.8
@@ -16,7 +17,7 @@ enum GaugeIcon {
             let track = NSBezierPath()
             track.appendArc(withCenter: center, radius: radius, startAngle: 0, endAngle: 360)
             track.lineWidth = lineWidth
-            NSColor.black.withAlphaComponent(0.3).setStroke()
+            (color ?? .black).withAlphaComponent(0.3).setStroke()
             track.stroke()
 
             guard pct > 0 else { return true }
@@ -28,23 +29,24 @@ enum GaugeIcon {
                           startAngle: 90, endAngle: 90 - sweep, clockwise: true)
             arc.lineWidth = lineWidth
             arc.lineCapStyle = .round
-            NSColor.black.setStroke()
+            (color ?? .black).setStroke()
             arc.stroke()
             return true
         }
-        image.isTemplate = true
+        image.isTemplate = color == nil
         image.accessibilityDescription = "已用 \(Int((pct * 100).rounded()))%"
         return image
     }
 
-    /// SF Symbol，取不到就退回空环
-    static func symbol(_ name: String, description: String) -> NSImage {
+    /// SF Symbol，取不到就退回空环。传了 color 就染成该色。
+    static func symbol(_ name: String, description: String, color: NSColor? = nil) -> NSImage {
         guard let img = NSImage(systemSymbolName: name, accessibilityDescription: description) else {
-            return ring(progress: 0)
+            return ring(progress: 0, color: color)
         }
-        let config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        var config = NSImage.SymbolConfiguration(pointSize: 13, weight: .regular)
+        if let color { config = config.applying(.init(paletteColors: [color])) }
         let sized = img.withSymbolConfiguration(config) ?? img
-        sized.isTemplate = true
+        sized.isTemplate = color == nil
         return sized
     }
 }
